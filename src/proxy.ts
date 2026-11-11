@@ -9,7 +9,7 @@ const createNonce = () => {
   return btoa(String.fromCharCode(...bytes));
 };
 
-function buildCsp(nonce?: string) {
+function buildCsp(nonce: string | undefined, isHttps: boolean) {
   const scriptSrc = isDevelopment
     ? `'self' 'unsafe-eval' 'unsafe-inline'`
     : `'self' 'nonce-${nonce}'`;
@@ -27,13 +27,24 @@ function buildCsp(nonce?: string) {
     "base-uri 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
-    "upgrade-insecure-requests",
+    // Only force HTTPS sub-requests when the page itself came over HTTPS;
+    // otherwise a plain-HTTP LAN install (http://192.168.x.x:3000) breaks.
+    ...(isHttps ? ["upgrade-insecure-requests"] : []),
   ].join("; ");
 }
 
+const isHttpsRequest = (request: NextRequest) => {
+  if (request.nextUrl.protocol === "https:") return true;
+  if (process.env.TRUSTED_PROXY_HEADERS === "true") {
+    return request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() === "https";
+  }
+  return false;
+};
+
 export function proxy(request: NextRequest) {
   const nonce = createNonce();
-  const csp = buildCsp(nonce);
+  const isHttps = isHttpsRequest(request);
+  const csp = buildCsp(nonce, isHttps);
   const requestHeaders = new Headers(request.headers);
 
   if (nonce) {
@@ -48,6 +59,9 @@ export function proxy(request: NextRequest) {
   });
 
   response.headers.set("Content-Security-Policy", csp);
+  if (isHttps) {
+    response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+  }
   return response;
 }
 

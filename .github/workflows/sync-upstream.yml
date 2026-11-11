@@ -1,0 +1,49 @@
+name: Sync upstream
+
+# Pulls new tracker data and fixes from handokota/trackerpathways once a day
+# and rebuilds the image when anything changed. If a merge conflicts, the run
+# fails and nothing is pushed; resolve it locally.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/handokota/trackerpathways.git
+          git fetch upstream main
+          before=$(git rev-parse HEAD)
+          git merge --no-edit upstream/main
+          if [ "$(git rev-parse HEAD)" = "$before" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git push origin HEAD:main
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    uses: ./.github/workflows/docker-build.yml
+    permissions:
+      contents: read
+      packages: write

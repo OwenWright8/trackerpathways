@@ -21,8 +21,10 @@ import {
 import OfficialInvitesDialog from "@/components/shared/OfficialInvitesDialog";
 import OfficialInvitesBadge from "@/components/shared/OfficialInvitesBadge";
 import UiState from "@/components/shared/UiState";
+import { createRouteSearcher } from "@/lib/routeSearch";
 
 const data = rawData as unknown as DataStructure;
+const searchRoutes = createRouteSearcher(data);
 const DEFAULT_ROUTES_PER_PAGE = 12;
 const ROUTES_PER_PAGE_OPTIONS = [12, 24, 48] as const;
 
@@ -98,9 +100,12 @@ export default function TrackerSearchApp() {
   const [sourceSearch, setSourceSearch] = useState(searchParams.get("source") || "");
   const [targetSearch, setTargetSearch] = useState(searchParams.get("target") || "");
 
-  const [maxJumps, setMaxJumps] = useState<number>(
-    searchParams.get("jumps") ? Number.parseInt(searchParams.get("jumps")!, 10) : 5
-  );
+  const [maxJumps, setMaxJumps] = useState<number>(() => {
+    // Clamp shared-link values: search runs in the browser, so an absurd
+    // jump count would freeze the tab rather than get rejected by the API.
+    const parsed = Number.parseInt(searchParams.get("jumps") ?? "", 10);
+    return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 8) : 5;
+  });
   const [maxDays, setMaxDays] = useState<number | null>(
     searchParams.get("days") ? Number.parseInt(searchParams.get("days")!, 10) : null
   );
@@ -233,43 +238,32 @@ export default function TrackerSearchApp() {
       setSearchError(null);
 
       try {
-        const params = new URLSearchParams();
-        if (deferredSource) params.append("source", deferredSource);
-        if (deferredTarget) params.append("target", deferredTarget);
-        params.append("jumps", maxJumps.toString());
-        if (maxDays !== null) params.append("days", maxDays.toString());
+        // Search runs locally against the bundled dataset, so typing never
+        // hits the server (and can never be rate limited).
+        const results = searchRoutes({
+          source: deferredSource,
+          target: deferredTarget,
+          maxJumps,
+          maxDays,
+        });
 
-        const res = await fetch(`/api/routes?${params.toString()}`, { signal: controller.signal });
-        const payload: unknown = await res.json();
-
-        if (!res.ok) {
-          const message = typeof payload === "object" && payload && "error" in payload && typeof payload.error === "string"
-            ? payload.error
-            : "Search request failed. Please try again.";
-          throw new Error(message);
-        }
-
-        if (!Array.isArray(payload)) {
-          throw new Error("Unexpected response format from the server.");
-        }
-
-        if (requestId === latestRequestIdRef.current) {
-          setFoundPaths(payload as PathResult[]);
+        if (requestId === latestRequestIdRef.current && !controller.signal.aborted) {
+          setFoundPaths(results);
         }
       } catch (error) {
         if (controller.signal.aborted) {
           return;
         }
 
-        console.error("Failed to fetch routes", error);
+        console.error("Route search failed", error);
         setFoundPaths([]);
-        setSearchError(error instanceof Error ? error.message : "Failed to fetch routes.");
+        setSearchError(error instanceof Error ? error.message : "Route search failed.");
       } finally {
         if (requestId === latestRequestIdRef.current) {
           setIsLoading(false);
         }
       }
-    }, 300);
+    }, 150);
 
     return () => {
       clearTimeout(timeoutId);

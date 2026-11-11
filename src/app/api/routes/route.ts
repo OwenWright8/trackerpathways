@@ -1,26 +1,24 @@
 import { NextResponse } from "next/server";
 import rawData from "@/data/trackers.json";
-import { DataStructure, PathResult } from "@/types";
+import { DataStructure } from "@/types";
+import { createRouteSearcher } from "@/lib/routeSearch";
 
 const data = rawData as unknown as DataStructure;
 const MAX_API_JUMPS = 8;
 const MAX_API_DAYS = 3650;
-const MAX_PATHS_LIMIT = 999;
 const MAX_QUERY_LENGTH = 256;
 const MAX_SOURCE_ITEMS = 16;
 const MAX_SOURCE_ITEM_LENGTH = 64;
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_REQUESTS = 6;
 const RATE_LIMIT_MAX_BUCKETS = 5000;
-const allTrackerKeys = Object.keys(data.routeInfo);
-const allTrackers = Array.from(new Set([
-  ...allTrackerKeys,
-  ...allTrackerKeys.flatMap((key) => Object.keys(data.routeInfo[key] || {})),
-]));
 
-interface RouteSearchResult extends PathResult {
-  stepDays: Array<number | null>;
-}
+// Self-hosted default: no rate limit. The web UI searches in the browser and
+// never calls this endpoint; set RATE_LIMIT_PER_MINUTE to cap scripted callers.
+const parsedRateLimit = Number.parseInt(process.env.RATE_LIMIT_PER_MINUTE ?? "0", 10);
+const RATE_LIMIT_MAX_REQUESTS = Number.isFinite(parsedRateLimit) && parsedRateLimit > 0 ? parsedRateLimit : 0;
+const rateLimitEnabled = RATE_LIMIT_MAX_REQUESTS > 0;
+
+const searchRoutes = createRouteSearcher(data);
 
 interface RateLimitBucket {
   count: number;
@@ -34,17 +32,6 @@ interface RateLimitResult {
 }
 
 const rateLimitBuckets = new Map<string, RateLimitBucket>();
-
-const getAbbr = (name: string) => {
-  if (data.trackerInfo[name]) return data.trackerInfo[name].abbr;
-  const capitals = name.match(/[A-Z]/g);
-  if (capitals && capitals.length >= 2) return capitals.join("");
-  return name.substring(0, 3).toUpperCase();
-};
-
-const strictTrackerIdentifiers = new Set(
-  allTrackers.flatMap((trackerName) => [trackerName.toLowerCase(), getAbbr(trackerName).toLowerCase()])
-);
 
 const parseAndValidatePositiveInt = (
   rawValue: string | null,
@@ -138,11 +125,13 @@ const consumeRateLimit = (clientKey: string, now: number): RateLimitResult => {
   };
 };
 
-const buildRateLimitHeaders = (rateLimit: RateLimitResult) => ({
-  "X-RateLimit-Limit": RATE_LIMIT_MAX_REQUESTS.toString(),
-  "X-RateLimit-Remaining": rateLimit.remaining.toString(),
-  "X-RateLimit-Reset": Math.ceil(rateLimit.resetAt / 1000).toString(),
-});
+const buildRateLimitHeaders = (rateLimit: RateLimitResult): Record<string, string> => rateLimitEnabled
+  ? {
+    "X-RateLimit-Limit": RATE_LIMIT_MAX_REQUESTS.toString(),
+    "X-RateLimit-Remaining": rateLimit.remaining.toString(),
+    "X-RateLimit-Reset": Math.ceil(rateLimit.resetAt / 1000).toString(),
+  }
+  : {};
 
 const buildRateLimitExceededHeaders = (rateLimit: RateLimitResult, now: number) => ({
   ...buildRateLimitHeaders(rateLimit),
@@ -151,7 +140,9 @@ const buildRateLimitExceededHeaders = (rateLimit: RateLimitResult, now: number) 
 
 export async function GET(request: Request) {
   const now = Date.now();
-  const rateLimit = consumeRateLimit(getClientIdentifier(request), now);
+  const rateLimit: RateLimitResult = rateLimitEnabled
+    ? consumeRateLimit(getClientIdentifier(request), now)
+    : { allowed: true, remaining: 0, resetAt: now };
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: "Too many requests. Please try again later." },
@@ -211,107 +202,11 @@ export async function GET(request: Request) {
     return NextResponse.json([], { headers: buildRateLimitHeaders(rateLimit) });
   }
 
-  const isStrictTarget = strictTrackerIdentifiers.has(tQuery);
-
-  let startNodes: string[] = [];
-
-  if (sourceInputs.length > 0) {
-    startNodes = allTrackerKeys.filter((trackerName) => {
-      const trackerLower = trackerName.toLowerCase();
-      const trackerAbbr = getAbbr(trackerName).toLowerCase();
-      return sourceInputs.some((input) => {
-        const isStrictInput = strictTrackerIdentifiers.has(input);
-        if (isStrictInput) {
-          return trackerLower === input || trackerAbbr === input;
-        }
-        return trackerLower.includes(input) || trackerAbbr === input;
-      });
-    });
-  } else if (tQuery) {
-    startNodes = allTrackerKeys;
-  }
-
-  const startNodeSet = new Set(startNodes);
-  const results: RouteSearchResult[] = [];
-  const queue: RouteSearchResult[] = startNodes.map((start) => ({
-      source: start,
-      target: start,
-      nodes: [start],
-      totalDays: 0,
-      stepDays: [],
-      routes: []
-    }));
-
-  let pathsFound = 0;
-
-  for (let queueIndex = 0; queueIndex < queue.length && pathsFound < MAX_PATHS_LIMIT; queueIndex += 1) {
-    const currentPath = queue[queueIndex];
-
-    const currentNode = currentPath.nodes[currentPath.nodes.length - 1];
-    if (!currentNode) continue;
-
-    if (currentPath.nodes.length > 1) {
-      let isTargetMatch = true;
-      if (tQuery) {
-        const cName = currentNode.toLowerCase();
-        const cAbbr = getAbbr(currentNode).toLowerCase();
-        if (isStrictTarget) {
-          isTargetMatch = cName === tQuery || cAbbr === tQuery;
-        } else {
-          isTargetMatch = cName.includes(tQuery) || cAbbr.includes(tQuery);
-        }
-      }
-
-      if (isTargetMatch) {
-        if (maxDays === null || (currentPath.totalDays !== null && currentPath.totalDays <= maxDays)) {
-          results.push(currentPath);
-          pathsFound++;
-        }
-      }
-    }
-
-    if (currentPath.routes.length >= maxJumps) continue;
-
-    const neighbors = data.routeInfo[currentNode];
-    if (neighbors) {
-      for (const [nextTracker, details] of Object.entries(neighbors)) {
-        if (startNodeSet.has(nextTracker) && nextTracker.toLowerCase() !== tQuery) {
-          continue;
-        }
-
-        if (!currentPath.nodes.includes(nextTracker)) {
-          const edgeDays = details.days;
-          const forumReq = data.unlockInviteClass[currentNode];
-          const forumDays = forumReq?.[0] ?? 0;
-          let stepDays: number | null = null;
-
-          if (edgeDays !== null) {
-            stepDays = Math.max(edgeDays, forumDays);
-          }
-
-          const nextTotalDays = (currentPath.totalDays === null || stepDays === null) ? null : currentPath.totalDays + stepDays;
-
-          if (maxDays !== null && nextTotalDays !== null && nextTotalDays > maxDays) continue;
-
-          queue.push({
-            source: currentPath.source,
-            target: nextTracker,
-            nodes: [...currentPath.nodes, nextTracker],
-            totalDays: nextTotalDays,
-            stepDays: [...currentPath.stepDays, stepDays],
-            routes: [...currentPath.routes, details]
-          });
-        }
-      }
-    }
-  }
-
-  results.sort((a, b) => {
-    if (a.routes.length !== b.routes.length) return a.routes.length - b.routes.length;
-    const aDays = a.totalDays ?? Number.POSITIVE_INFINITY;
-    const bDays = b.totalDays ?? Number.POSITIVE_INFINITY;
-    if (aDays !== bDays) return aDays - bDays;
-    return a.target.localeCompare(b.target);
+  const results = searchRoutes({
+    source: sourceRaw,
+    target: targetRaw,
+    maxJumps,
+    maxDays,
   });
 
   return NextResponse.json(results, {

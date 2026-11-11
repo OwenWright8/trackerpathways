@@ -34,12 +34,10 @@ const themeInitScript = `
 `;
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://trackerpathways.org"),
   title: "Tracker Pathways",
   description: "Find your way to the trackers worth chasing.",
-  alternates: {
-    canonical: "/",
-  },
+  // Self-hosted instances are private by default.
+  robots: { index: false, follow: false },
 };
 
 export default async function RootLayout({

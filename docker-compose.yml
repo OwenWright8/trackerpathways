@@ -1,7 +1,22 @@
 services:
   trackerpathways:
-    image: handokota/trackerpathways:latest
+    image: ghcr.io/owenwright8/trackerpathways:latest
+    # To build from source instead, comment out `image:` and uncomment:
+    # build: .
     container_name: trackerpathways
     restart: unless-stopped
     ports:
       - "3000:3000"
+    environment:
+      # Optional cap on /api/routes calls per client per minute. 0 = no limit.
+      # The web UI searches in your browser and never calls the API.
+      RATE_LIMIT_PER_MINUTE: "0"
+      # Set to "true" only when running behind a reverse proxy you control
+      # (Caddy, Traefik, nginx). Lets the app see the real client IP and
+      # whether the original request was HTTPS.
+      TRUSTED_PROXY_HEADERS: "false"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
